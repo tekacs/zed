@@ -6,7 +6,7 @@ use editor::{
 };
 use futures::{
     channel::mpsc::{self, UnboundedSender},
-    SinkExt as _, StreamExt as _,
+    Future, SinkExt as _, StreamExt as _,
 };
 use gpui::{actions, AppContext, Context, EntityId, Global, Model, ModelContext, Task};
 use gpui::{Entity, View};
@@ -285,12 +285,12 @@ impl RuntimeManager {
         execution_id: ExecutionId,
         code: String,
         cx: &mut ModelContext<Self>,
-    ) -> Task<Result<mpsc::UnboundedReceiver<ExecutionUpdate>>> {
+    ) -> impl Future<Output = Result<mpsc::UnboundedReceiver<ExecutionUpdate>>> {
         let (tx, rx) = mpsc::unbounded();
 
         let execution_request_tx = self.acquire_execution_request_tx(entity_id, language_name, cx);
 
-        cx.spawn(|_this, _cx| async move {
+        async move {
             let execution_request_tx = execution_request_tx.await?;
 
             execution_request_tx
@@ -311,7 +311,7 @@ impl RuntimeManager {
                 .context("Failed to send execution request")?;
 
             Ok(rx)
-        })
+        }
     }
 
     pub fn global(cx: &AppContext) -> Option<Model<Self>> {
