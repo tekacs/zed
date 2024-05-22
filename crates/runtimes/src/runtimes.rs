@@ -213,12 +213,12 @@ impl RuntimeManager {
         let kernel_path = std::path::PathBuf::from(kernel_path);
 
         let _runtime_handle = std::thread::spawn(|| {
-            let runtime = tokio::runtime::Builder::new_current_thread()
+            let tokio_runtime = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build();
 
-            let runtime = match runtime {
-                Ok(runtime) => runtime,
+            let tokio_runtime = match tokio_runtime {
+                Ok(tokio_runtime) => tokio_runtime,
                 Err(e) => {
                     log::error!("Failed to create tokio runtime for jupyter kernel: {e:?}");
                     return;
@@ -226,7 +226,7 @@ impl RuntimeManager {
             };
 
             // TODO: Will need a signal handler to shutdown the runtime
-            runtime
+            tokio_runtime
                 .block_on(async move {
                     // Set up the kernel client here as our prototype
                     let kernel_path = kernel_path.clone();
