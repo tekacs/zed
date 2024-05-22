@@ -193,6 +193,7 @@ impl Inventory {
         Vec<(TaskSourceKind, ResolvedTask)>,
         Vec<(TaskSourceKind, ResolvedTask)>,
     ) {
+        // TODO kb proxy that through the project's list_task analogue so it requests collab for remote projects + merge it with the local tasks
         let task_source_kind = language.as_ref().map(|language| TaskSourceKind::Language {
             name: language.name(),
         });
@@ -434,21 +435,6 @@ mod test_inventory {
                 .into_iter()
                 .map(|(_, task)| task.label)
                 .sorted()
-                .collect()
-        })
-    }
-
-    pub(super) fn resolved_task_names(
-        inventory: &Model<Inventory>,
-        worktree: Option<WorktreeId>,
-        cx: &mut TestAppContext,
-    ) -> Vec<String> {
-        inventory.update(cx, |inventory, _| {
-            let (used, current) =
-                inventory.used_and_current_resolved_tasks(None, worktree, &TaskContext::default());
-            used.into_iter()
-                .chain(current)
-                .map(|(_, task)| task.original_task().label.clone())
                 .collect()
         })
     }
@@ -829,5 +815,20 @@ mod tests {
                 .sorted_by_key(|(kind, label)| (task_source_kind_preference(kind), label.clone()))
                 .collect::<Vec<_>>(),
         );
+    }
+
+    pub(super) fn resolved_task_names(
+        inventory: &Model<Inventory>,
+        worktree: Option<WorktreeId>,
+        cx: &mut TestAppContext,
+    ) -> Vec<String> {
+        inventory.update(cx, |inventory, _| {
+            let (used, current) =
+                inventory.used_and_current_resolved_tasks(None, worktree, &TaskContext::default());
+            used.into_iter()
+                .chain(current)
+                .map(|(_, task)| task.original_task().label.clone())
+                .collect()
+        })
     }
 }

@@ -99,7 +99,7 @@ use std::{
 };
 use task::{
     static_source::{StaticSource, TrackedFile},
-    TaskContext, TaskVariables, VariableName,
+    TaskContext, TaskTemplate, TaskVariables, VariableName,
 };
 use terminals::Terminals;
 use text::{Anchor, BufferId, LineEnding};
@@ -9351,6 +9351,7 @@ impl Project {
             .payload
             .location
             .context("no location given for task context handling")?;
+        // TODO kb extract it into a function
         let buffer_id = BufferId::new(location.buffer_id)?;
         let buffer = project
             .update(&mut cx, |project, cx| {
@@ -9383,6 +9384,17 @@ impl Project {
                 .map(|(variable_name, variable_value)| (variable_name.to_string(), variable_value))
                 .collect(),
         })
+    }
+
+    async fn handle_task_templates(
+        project: Model<Self>,
+        envelope: TypedEnvelope<proto::TaskTemplates>,
+        _: Arc<Client>,
+        mut cx: AsyncAppContext,
+    ) -> Result<proto::TaskTemplatesResponse> {
+        // todo!("TODO kb")
+
+        Ok(proto::TaskTemplatesResponse { templates: vec![] })
     }
 
     async fn try_resolve_code_action(
@@ -10443,6 +10455,37 @@ impl Project {
         } else {
             Task::ready(None)
         }
+    }
+
+    pub fn task_templates(
+        &self,
+        location: Location,
+        worktree: WorktreeId,
+        cx: &mut AppContext,
+    ) -> Task<Result<Vec<(TaskSourceKind, TaskTemplate)>>> {
+        // if self.is_local() {
+        //     let language = buffer.read(cx).language();
+        //     Task::ready(Ok(self
+        //         .task_inventory()
+        //         .read(cx)
+        //         .list_tasks(language.cloned(), worktree)))
+        // } else if let Some(project_id) = self.remote_id() {
+        //     let task_templates = self.client().request(proto::TaskTemplates {
+        //         project_id,
+        //         buffer_id: buffer.read(cx).remote_id().into(),
+        //     });
+        //     cx.background_executor().spawn(async move {
+        //         let response = task_templates.await.log_err()?;
+        //         // Ok(response.templates
+        //         //     .into_iter()
+        //         //     .map(|template| (template.task_context, template.task)
+        //         //     .collect())
+        //         todo!("TODO kb")
+        //     })
+        // } else {
+        //     Task::ready(Ok(Vec::new()))
+        // }
+        todo!()
     }
 
     fn task_cwd(&self, cx: &AppContext) -> anyhow::Result<Option<PathBuf>> {

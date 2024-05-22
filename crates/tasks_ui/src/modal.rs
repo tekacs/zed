@@ -204,7 +204,7 @@ impl PickerDelegate for TasksModalDelegate {
                     let candidates = match &mut picker.delegate.candidates {
                         Some(candidates) => candidates,
                         None => {
-                            let Ok((worktree, language)) =
+                            let Ok(Some((worktree, location))) =
                                 picker.delegate.workspace.update(cx, |workspace, cx| {
                                     active_item_selection_properties(workspace, cx)
                                 })
@@ -212,10 +212,12 @@ impl PickerDelegate for TasksModalDelegate {
                                 return Vec::new();
                             };
                             let (used, current) =
-                                picker.delegate.inventory.update(cx, |inventory, _| {
+                                picker.delegate.inventory.update(cx, |inventory, cx| {
+                                    let language =
+                                        location.buffer.read(cx).language_at(location.range.start);
                                     inventory.used_and_current_resolved_tasks(
                                         language,
-                                        worktree,
+                                        Some(worktree),
                                         &picker.delegate.task_context,
                                     )
                                 });

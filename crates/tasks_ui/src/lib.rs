@@ -1,11 +1,8 @@
-use std::sync::Arc;
-
 use ::settings::Settings;
 use editor::{tasks::task_context, Editor};
 use gpui::{AppContext, Task as AsyncTask, ViewContext, WindowContext};
-use language::Language;
 use modal::TasksModal;
-use project::WorktreeId;
+use project::{Location, WorktreeId};
 use workspace::tasks::schedule_task;
 use workspace::{tasks::schedule_resolved_task, Workspace};
 
@@ -80,10 +77,9 @@ pub fn init(cx: &mut AppContext) {
 
 fn spawn_task_or_modal(workspace: &mut Workspace, action: &Spawn, cx: &mut ViewContext<Workspace>) {
     match &action.task_name {
-        Some(name) => spawn_task_with_name(name.clone(), cx),
-        None => toggle_modal(workspace, cx),
+        Some(name) => spawn_task_with_name(name.clone(), cx).detach_and_log_err(cx),
+        None => toggle_modal(workspace, cx).detach(),
     }
-    .detach()
 }
 
 fn toggle_modal(workspace: &mut Workspace, cx: &mut ViewContext<'_, Workspace>) -> AsyncTask<()> {
@@ -102,22 +98,29 @@ fn toggle_modal(workspace: &mut Workspace, cx: &mut ViewContext<'_, Workspace>) 
     })
 }
 
-fn spawn_task_with_name(name: String, cx: &mut ViewContext<Workspace>) -> AsyncTask<()> {
+fn spawn_task_with_name(
+    name: String,
+    cx: &mut ViewContext<Workspace>,
+) -> AsyncTask<anyhow::Result<()>> {
     cx.spawn(|workspace, mut cx| async move {
-        let Ok(context_task) =
-            workspace.update(&mut cx, |workspace, cx| task_context(workspace, cx))
-        else {
-            return;
-        };
+        let context_task =
+            workspace.update(&mut cx, |workspace, cx| task_context(workspace, cx))?;
         let task_context = context_task.await;
+        let tasks = workspace
+            .update(&mut cx, |workspace, cx| {
+                if let Some((worktree, location)) = active_item_selection_properties(workspace, cx)
+                {
+                    workspace.project().update(cx, |project, cx| {
+                        project.task_templates(location, worktree, cx)
+                    })
+                } else {
+                    AsyncTask::ready(Ok(Vec::new()))
+                }
+            })?
+            .await?;
+
         let did_spawn = workspace
             .update(&mut cx, |workspace, cx| {
-                let (worktree, language) = active_item_selection_properties(workspace, cx);
-                let tasks = workspace.project().update(cx, |project, cx| {
-                    project
-                        .task_inventory()
-                        .update(cx, |inventory, _| inventory.list_tasks(language, worktree))
-                });
                 let (task_source_kind, target_task) =
                     tasks.into_iter().find(|(_, task)| task.label == name)?;
                 schedule_task(
@@ -129,9 +132,7 @@ fn spawn_task_with_name(name: String, cx: &mut ViewContext<Workspace>) -> AsyncT
                     cx,
                 );
                 Some(())
-            })
-            .ok()
-            .flatten()
+            })?
             .is_some();
         if !did_spawn {
             workspace
@@ -140,31 +141,38 @@ fn spawn_task_with_name(name: String, cx: &mut ViewContext<Workspace>) -> AsyncT
                 })
                 .ok();
         }
+
+        Ok(())
     })
 }
 
 fn active_item_selection_properties(
     workspace: &Workspace,
     cx: &mut WindowContext,
-) -> (Option<WorktreeId>, Option<Arc<Language>>) {
+) -> Option<(WorktreeId, Location)> {
     let active_item = workspace.active_item(cx);
     let worktree_id = active_item
         .as_ref()
         .and_then(|item| item.project_path(cx))
         .map(|path| path.worktree_id);
-    let language = active_item
+    let location = active_item
         .and_then(|active_item| active_item.act_as::<Editor>(cx))
         .and_then(|editor| {
             editor.update(cx, |editor, cx| {
-                let selection = editor.selections.newest::<usize>(cx);
-                let (buffer, buffer_position, _) = editor
-                    .buffer()
-                    .read(cx)
-                    .point_to_buffer_offset(selection.start, cx)?;
-                buffer.read(cx).language_at(buffer_position)
+                let selection = editor.selections.newest_anchor();
+                let multi_buffer = editor.buffer().clone();
+                let multi_buffer_snapshot = multi_buffer.read(cx).snapshot(cx);
+                let (buffer_snapshot, buffer_offset) =
+                    multi_buffer_snapshot.point_to_buffer_offset(selection.head())?;
+                let buffer_anchor = buffer_snapshot.anchor_before(buffer_offset);
+                let buffer = multi_buffer.read(cx).buffer(buffer_snapshot.remote_id())?;
+                Some(Location {
+                    buffer,
+                    range: buffer_anchor..buffer_anchor,
+                })
             })
         });
-    (worktree_id, language)
+    worktree_id.zip(location)
 }
 
 #[cfg(test)]
