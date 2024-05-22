@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use ::settings::Settings;
 use editor::{tasks::task_context, Editor};
-use gpui::{AppContext, ViewContext, WindowContext};
+use gpui::{AppContext, Task as AsyncTask, ViewContext, WindowContext};
 use language::Language;
 use modal::TasksModal;
 use project::WorktreeId;
@@ -34,15 +34,23 @@ pub fn init(cx: &mut AppContext) {
                             if let Some(use_new_terminal) = action.use_new_terminal {
                                 original_task.use_new_terminal = use_new_terminal;
                             }
-                            let task_context = task_context(workspace, cx);
-                            schedule_task(
-                                workspace,
-                                task_source_kind,
-                                &original_task,
-                                &task_context,
-                                false,
-                                cx,
-                            )
+                            let context_task = task_context(workspace, cx);
+                            cx.spawn(|workspace, mut cx| async move {
+                                let task_context = context_task.await;
+                                workspace
+                                    .update(&mut cx, |workspace, cx| {
+                                        schedule_task(
+                                            workspace,
+                                            task_source_kind,
+                                            &original_task,
+                                            &task_context,
+                                            false,
+                                            cx,
+                                        )
+                                    })
+                                    .ok()
+                            })
+                            .detach()
                         } else {
                             if let Some(resolved) = last_scheduled_task.resolved.as_mut() {
                                 if let Some(allow_concurrent_runs) = action.allow_concurrent_runs {
@@ -62,7 +70,7 @@ pub fn init(cx: &mut AppContext) {
                             );
                         }
                     } else {
-                        toggle_modal(workspace, cx);
+                        toggle_modal(workspace, cx).detach();
                     };
                 });
         },
@@ -75,19 +83,33 @@ fn spawn_task_or_modal(workspace: &mut Workspace, action: &Spawn, cx: &mut ViewC
         Some(name) => spawn_task_with_name(name.clone(), cx),
         None => toggle_modal(workspace, cx),
     }
+    .detach()
 }
 
-fn toggle_modal(workspace: &mut Workspace, cx: &mut ViewContext<'_, Workspace>) {
+fn toggle_modal(workspace: &mut Workspace, cx: &mut ViewContext<'_, Workspace>) -> AsyncTask<()> {
     let inventory = workspace.project().read(cx).task_inventory().clone();
     let workspace_handle = workspace.weak_handle();
-    let task_context = task_context(workspace, cx);
-    workspace.toggle_modal(cx, |cx| {
-        TasksModal::new(inventory, task_context, workspace_handle, cx)
+    let context_task = task_context(workspace, cx);
+    cx.spawn(|workspace, mut cx| async move {
+        let task_context = context_task.await;
+        workspace
+            .update(&mut cx, |workspace, cx| {
+                workspace.toggle_modal(cx, |cx| {
+                    TasksModal::new(inventory, task_context, workspace_handle, cx)
+                })
+            })
+            .ok();
     })
 }
 
-fn spawn_task_with_name(name: String, cx: &mut ViewContext<Workspace>) {
+fn spawn_task_with_name(name: String, cx: &mut ViewContext<Workspace>) -> AsyncTask<()> {
     cx.spawn(|workspace, mut cx| async move {
+        let Ok(context_task) =
+            workspace.update(&mut cx, |workspace, cx| task_context(workspace, cx))
+        else {
+            return;
+        };
+        let task_context = context_task.await;
         let did_spawn = workspace
             .update(&mut cx, |workspace, cx| {
                 let (worktree, language) = active_item_selection_properties(workspace, cx);
@@ -98,7 +120,6 @@ fn spawn_task_with_name(name: String, cx: &mut ViewContext<Workspace>) {
                 });
                 let (task_source_kind, target_task) =
                     tasks.into_iter().find(|(_, task)| task.label == name)?;
-                let task_context = task_context(workspace, cx);
                 schedule_task(
                     workspace,
                     task_source_kind,
@@ -120,7 +141,6 @@ fn spawn_task_with_name(name: String, cx: &mut ViewContext<Workspace>) {
                 .ok();
         }
     })
-    .detach();
 }
 
 fn active_item_selection_properties(
@@ -250,57 +270,72 @@ mod tests {
             .unwrap();
         buffer2.update(cx, |this, cx| this.set_language(Some(rust_language), cx));
         let editor2 = cx.new_view(|cx| Editor::for_buffer(buffer2, Some(project), cx));
-        workspace.update(cx, |this, cx| {
-            this.add_item_to_center(Box::new(editor1.clone()), cx);
-            this.add_item_to_center(Box::new(editor2.clone()), cx);
-            assert_eq!(this.active_item(cx).unwrap().item_id(), editor2.entity_id());
-            assert_eq!(
-                task_context(this, cx),
-                TaskContext {
-                    cwd: Some("/dir".into()),
-                    task_variables: TaskVariables::from_iter([
-                        (VariableName::File, "/dir/rust/b.rs".into()),
-                        (VariableName::WorktreeRoot, "/dir".into()),
-                        (VariableName::Row, "1".into()),
-                        (VariableName::Column, "1".into()),
-                    ])
-                }
-            );
-            // And now, let's select an identifier.
-            editor2.update(cx, |this, cx| {
-                this.change_selections(None, cx, |selections| selections.select_ranges([14..18]))
-            });
-            assert_eq!(
-                task_context(this, cx),
-                TaskContext {
-                    cwd: Some("/dir".into()),
-                    task_variables: TaskVariables::from_iter([
-                        (VariableName::File, "/dir/rust/b.rs".into()),
-                        (VariableName::WorktreeRoot, "/dir".into()),
-                        (VariableName::Row, "1".into()),
-                        (VariableName::Column, "15".into()),
-                        (VariableName::SelectedText, "is_i".into()),
-                        (VariableName::Symbol, "this_is_a_rust_file".into()),
-                    ])
-                }
-            );
 
-            // Now, let's switch the active item to .ts file.
-            this.activate_item(&editor1, cx);
-            assert_eq!(
-                task_context(this, cx),
-                TaskContext {
-                    cwd: Some("/dir".into()),
-                    task_variables: TaskVariables::from_iter([
-                        (VariableName::File, "/dir/a.ts".into()),
-                        (VariableName::WorktreeRoot, "/dir".into()),
-                        (VariableName::Row, "1".into()),
-                        (VariableName::Column, "1".into()),
-                        (VariableName::Symbol, "this_is_a_test".into()),
-                    ])
-                }
-            );
+        let first_context = workspace
+            .update(cx, |workspace, cx| {
+                workspace.add_item_to_center(Box::new(editor1.clone()), cx);
+                workspace.add_item_to_center(Box::new(editor2.clone()), cx);
+                assert_eq!(
+                    workspace.active_item(cx).unwrap().item_id(),
+                    editor2.entity_id()
+                );
+                task_context(workspace, cx)
+            })
+            .await;
+        assert_eq!(
+            first_context,
+            TaskContext {
+                cwd: Some("/dir".into()),
+                task_variables: TaskVariables::from_iter([
+                    (VariableName::File, "/dir/rust/b.rs".into()),
+                    (VariableName::WorktreeRoot, "/dir".into()),
+                    (VariableName::Row, "1".into()),
+                    (VariableName::Column, "1".into()),
+                ])
+            }
+        );
+
+        // And now, let's select an identifier.
+        editor2.update(cx, |editor, cx| {
+            editor.change_selections(None, cx, |selections| selections.select_ranges([14..18]))
         });
+
+        assert_eq!(
+            workspace
+                .update(cx, |workspace, cx| { task_context(workspace, cx) })
+                .await,
+            TaskContext {
+                cwd: Some("/dir".into()),
+                task_variables: TaskVariables::from_iter([
+                    (VariableName::File, "/dir/rust/b.rs".into()),
+                    (VariableName::WorktreeRoot, "/dir".into()),
+                    (VariableName::Row, "1".into()),
+                    (VariableName::Column, "15".into()),
+                    (VariableName::SelectedText, "is_i".into()),
+                    (VariableName::Symbol, "this_is_a_rust_file".into()),
+                ])
+            }
+        );
+
+        assert_eq!(
+            workspace
+                .update(cx, |workspace, cx| {
+                    // Now, let's switch the active item to .ts file.
+                    workspace.activate_item(&editor1, cx);
+                    task_context(workspace, cx)
+                })
+                .await,
+            TaskContext {
+                cwd: Some("/dir".into()),
+                task_variables: TaskVariables::from_iter([
+                    (VariableName::File, "/dir/a.ts".into()),
+                    (VariableName::WorktreeRoot, "/dir".into()),
+                    (VariableName::Row, "1".into()),
+                    (VariableName::Column, "1".into()),
+                    (VariableName::Symbol, "this_is_a_test".into()),
+                ])
+            }
+        );
     }
 
     pub(crate) fn init_test(cx: &mut TestAppContext) -> Arc<AppState> {

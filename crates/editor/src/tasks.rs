@@ -1,74 +1,35 @@
 use crate::Editor;
 
-use std::{path::Path, sync::Arc};
-
-use anyhow::Context;
-use gpui::WindowContext;
-use language::{BasicContextProvider, ContextProvider};
-use project::{Location, WorktreeId};
-use task::{TaskContext, TaskVariables, VariableName};
+use gpui::{Task as AsyncTask, WindowContext};
+use project::Location;
+use task::{TaskContext, VariableName};
 use text::Point;
 use util::ResultExt;
 use workspace::Workspace;
 
-pub(crate) fn task_context_for_location(
-    workspace: &Workspace,
-    location: Location,
-    cx: &mut WindowContext<'_>,
-) -> Option<TaskContext> {
-    let cwd = workspace::tasks::task_cwd(workspace, cx)
-        .log_err()
-        .flatten();
-
-    let buffer = location.buffer.clone();
-    let language_context_provider = buffer
-        .read(cx)
-        .language()
-        .and_then(|language| language.context_provider())
-        .unwrap_or_else(|| Arc::new(BasicContextProvider));
-
-    let worktree_abs_path = buffer
-        .read(cx)
-        .file()
-        .map(|file| WorktreeId::from_usize(file.worktree_id()))
-        .and_then(|worktree_id| {
-            workspace
-                .project()
-                .read(cx)
-                .worktree_for_id(worktree_id, cx)
-                .map(|worktree| worktree.read(cx).abs_path())
-        });
-    let task_variables = combine_task_variables(
-        worktree_abs_path.as_deref(),
-        location,
-        language_context_provider.as_ref(),
-        cx,
-    )
-    .log_err()?;
-    Some(TaskContext {
-        cwd,
-        task_variables,
-    })
-}
-
 fn task_context_with_editor(
-    workspace: &Workspace,
     editor: &mut Editor,
     cx: &mut WindowContext<'_>,
-) -> Option<TaskContext> {
+) -> AsyncTask<Option<TaskContext>> {
+    let Some(project) = editor.project.clone() else {
+        return AsyncTask::ready(None);
+    };
     let (selection, buffer, editor_snapshot) = {
         let mut selection = editor.selections.newest::<Point>(cx);
         if editor.selections.line_mode {
             selection.start = Point::new(selection.start.row, 0);
             selection.end = Point::new(selection.end.row + 1, 0);
         }
-        let (buffer, _, _) = editor
+        let Some((buffer, _, _)) = editor
             .buffer()
             .read(cx)
-            .point_to_buffer_offset(selection.start, cx)?;
+            .point_to_buffer_offset(selection.start, cx)
+        else {
+            return AsyncTask::ready(None);
+        };
         let snapshot = editor.snapshot(cx);
-        Some((selection, buffer, snapshot))
-    }?;
+        (selection, buffer, snapshot)
+    };
     let selection_range = selection.range();
     let start = editor_snapshot
         .display_snapshot
@@ -84,54 +45,40 @@ fn task_context_with_editor(
         buffer,
         range: start..end,
     };
-    task_context_for_location(workspace, location.clone(), cx).map(|mut task_context| {
-        for range in location
-            .buffer
-            .read(cx)
-            .snapshot()
-            .runnable_ranges(location.range)
-        {
-            for (capture_name, value) in range.extra_captures {
-                task_context
-                    .task_variables
-                    .insert(VariableName::Custom(capture_name.into()), value);
+
+    let context_task = project.update(cx, |project, cx| {
+        project.task_context_for_location(location.clone(), cx)
+    });
+    cx.spawn(|mut cx| async move {
+        context_task.await.map(|mut task_context| {
+            let Some(buffer_snapshot) = cx
+                .update(|cx| location.buffer.read(cx).snapshot())
+                .log_err()
+            else {
+                return task_context;
+            };
+            for range in buffer_snapshot.runnable_ranges(location.range) {
+                for (capture_name, value) in range.extra_captures {
+                    task_context
+                        .task_variables
+                        .insert(VariableName::Custom(capture_name.into()), value);
+                }
             }
-        }
-        task_context
+            task_context
+        })
     })
 }
 
-pub fn task_context(workspace: &Workspace, cx: &mut WindowContext<'_>) -> TaskContext {
+pub fn task_context(workspace: &Workspace, cx: &mut WindowContext<'_>) -> AsyncTask<TaskContext> {
     let Some(editor) = workspace
         .active_item(cx)
         .and_then(|item| item.act_as::<Editor>(cx))
     else {
-        return Default::default();
+        return AsyncTask::ready(TaskContext::default());
     };
     editor.update(cx, |editor, cx| {
-        task_context_with_editor(workspace, editor, cx).unwrap_or_default()
+        let context_task = task_context_with_editor(editor, cx);
+        cx.background_executor()
+            .spawn(async move { context_task.await.unwrap_or_default() })
     })
-}
-
-fn combine_task_variables(
-    worktree_abs_path: Option<&Path>,
-    location: Location,
-    context_provider: &dyn ContextProvider,
-    cx: &mut WindowContext<'_>,
-) -> anyhow::Result<TaskVariables> {
-    if context_provider.is_basic() {
-        context_provider
-            .build_context(worktree_abs_path, &location, cx)
-            .context("building basic provider context")
-    } else {
-        let mut basic_context = BasicContextProvider
-            .build_context(worktree_abs_path, &location, cx)
-            .context("building basic default context")?;
-        basic_context.extend(
-            context_provider
-                .build_context(worktree_abs_path, &location, cx)
-                .context("building provider context ")?,
-        );
-        Ok(basic_context)
-    }
 }

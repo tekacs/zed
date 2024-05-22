@@ -245,7 +245,10 @@ message Envelope {
 
         RegenerateDevServerToken regenerate_dev_server_token = 200;
         RegenerateDevServerTokenResponse regenerate_dev_server_token_response = 201;
-        RenameDevServer rename_dev_server = 202; // Current max
+        RenameDevServer rename_dev_server = 202;
+
+        TaskContextForLocation task_context_for_location = 203;
+        TaskContext task_context = 204; // Current max
     }
 
     reserved 158 to 161;
@@ -2116,4 +2119,14 @@ message GetSupermavenApiKey {}
 
 message GetSupermavenApiKeyResponse {
     string api_key = 1;
+}
+
+message TaskContextForLocation {
+    uint64 project_id = 1;
+    Location location = 2;
+}
+
+message TaskContext {
+    optional string cwd = 1;
+    map<string, string> task_variables = 2;
 }

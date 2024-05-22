@@ -447,6 +447,9 @@ impl Server {
             .add_message_handler(update_diagnostic_summary)
             .add_message_handler(update_worktree_settings)
             .add_request_handler(user_handler(
+                forward_read_only_project_request::<proto::TaskContextForLocation>,
+            ))
+            .add_request_handler(user_handler(
                 forward_read_only_project_request::<proto::GetHover>,
             ))
             .add_request_handler(user_handler(
