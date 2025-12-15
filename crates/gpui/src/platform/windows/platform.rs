@@ -354,6 +354,11 @@ impl Platform for WindowsPlatform {
             .with_callback(|callbacks| &callbacks.quit, |callback| callback());
     }
 
+    fn run_embedded(&self, on_finish_launching: Box<dyn 'static + FnOnce()>) {
+        on_finish_launching();
+        self.begin_vsync_thread();
+    }
+
     fn quit(&self) {
         self.foreground_executor()
             .spawn(async { unsafe { PostQuitMessage(0) } })

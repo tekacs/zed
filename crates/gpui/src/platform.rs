@@ -169,6 +169,15 @@ pub(crate) trait Platform: 'static {
     fn text_system(&self) -> Arc<dyn PlatformTextSystem>;
 
     fn run(&self, on_finish_launching: Box<dyn 'static + FnOnce()>);
+
+    /// Start GPUI without taking ownership of the platform event loop.
+    ///
+    /// This is intended for embedding GPUI in a host that already created and is already pumping
+    /// the OS UI loop (e.g. an Electron app). Platform implementations may need to perform
+    /// additional setup to integrate with the host loop.
+    fn run_embedded(&self, on_finish_launching: Box<dyn 'static + FnOnce()>) {
+        on_finish_launching();
+    }
     fn quit(&self);
     fn restart(&self, binary_path: Option<PathBuf>);
     fn activate(&self, ignoring_other_apps: bool);

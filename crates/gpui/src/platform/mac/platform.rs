@@ -45,7 +45,6 @@ use objc::{
     sel, sel_impl,
 };
 use parking_lot::Mutex;
-use ptr::null_mut;
 use semver::Version;
 use std::{
     cell::Cell,
@@ -68,8 +67,65 @@ use util::{
 const NSUTF8StringEncoding: NSUInteger = 4;
 
 const MAC_PLATFORM_IVAR: &str = "platform";
+static MAC_PLATFORM_ASSOC_KEY: u8 = 0;
+static MAC_ORIGINAL_DELEGATE_ASSOC_KEY: u8 = 0;
 static mut APP_CLASS: *const Class = ptr::null();
 static mut APP_DELEGATE_CLASS: *const Class = ptr::null();
+static mut APP_DELEGATE_PROXY_CLASS: *const Class = ptr::null();
+
+const OBJC_ASSOCIATION_RETAIN_NONATOMIC: usize = 1;
+
+#[link(name = "objc")]
+unsafe extern "C" {
+    fn objc_setAssociatedObject(
+        object: *mut Object,
+        key: *const c_void,
+        value: *mut Object,
+        policy: usize,
+    );
+    fn objc_getAssociatedObject(object: *mut Object, key: *const c_void) -> *mut Object;
+}
+
+unsafe fn set_associated_id(object: id, key: &'static u8, value: id) {
+    unsafe {
+        objc_setAssociatedObject(
+            object as *mut Object,
+            key as *const _ as *const c_void,
+            value as *mut Object,
+            OBJC_ASSOCIATION_RETAIN_NONATOMIC,
+        );
+    }
+}
+
+unsafe fn get_associated_id(object: id, key: &'static u8) -> id {
+    unsafe { objc_getAssociatedObject(object as *mut Object, key as *const _ as *const c_void) as id }
+}
+
+unsafe fn set_associated_platform(object: id, platform: *const MacPlatform) {
+    unsafe {
+        let value: id = msg_send![class!(NSValue), valueWithPointer: platform as *const c_void];
+        set_associated_id(object, &MAC_PLATFORM_ASSOC_KEY, value);
+    }
+}
+
+unsafe fn get_associated_platform(object: id) -> Option<*const MacPlatform> {
+    unsafe {
+        let value = get_associated_id(object, &MAC_PLATFORM_ASSOC_KEY);
+        if value == nil {
+            return None;
+        }
+        let ptr: *mut c_void = msg_send![value, pointerValue];
+        (!ptr.is_null()).then_some(ptr as *const MacPlatform)
+    }
+}
+
+unsafe fn set_associated_original_delegate(object: id, original_delegate: id) {
+    unsafe { set_associated_id(object, &MAC_ORIGINAL_DELEGATE_ASSOC_KEY, original_delegate) }
+}
+
+unsafe fn get_associated_original_delegate(object: id) -> id {
+    unsafe { get_associated_id(object, &MAC_ORIGINAL_DELEGATE_ASSOC_KEY) }
+}
 
 #[ctor]
 unsafe fn build_classes() {
@@ -94,7 +150,7 @@ unsafe fn build_classes() {
             );
             decl.add_method(
                 sel!(applicationShouldHandleReopen:hasVisibleWindows:),
-                should_handle_reopen as extern "C" fn(&mut Object, Sel, id, bool),
+                should_handle_reopen as extern "C" fn(&mut Object, Sel, id, bool) -> bool,
             );
             decl.add_method(
                 sel!(applicationWillTerminate:),
@@ -154,6 +210,90 @@ unsafe fn build_classes() {
             decl.register()
         }
     }
+
+    unsafe {
+        APP_DELEGATE_PROXY_CLASS = {
+            let mut decl =
+                ClassDecl::new("GPUIApplicationDelegateProxy", class!(NSResponder)).unwrap();
+            decl.add_ivar::<*mut c_void>(MAC_PLATFORM_IVAR);
+
+            decl.add_method(
+                sel!(forwardingTargetForSelector:),
+                forwarding_target_for_selector as extern "C" fn(&mut Object, Sel, Sel) -> id,
+            );
+            decl.add_method(
+                sel!(respondsToSelector:),
+                responds_to_selector as extern "C" fn(&mut Object, Sel, Sel) -> bool,
+            );
+
+            decl.add_method(
+                sel!(applicationWillFinishLaunching:),
+                will_finish_launching as extern "C" fn(&mut Object, Sel, id),
+            );
+            decl.add_method(
+                sel!(applicationDidFinishLaunching:),
+                did_finish_launching as extern "C" fn(&mut Object, Sel, id),
+            );
+            decl.add_method(
+                sel!(applicationShouldHandleReopen:hasVisibleWindows:),
+                should_handle_reopen as extern "C" fn(&mut Object, Sel, id, bool) -> bool,
+            );
+            decl.add_method(
+                sel!(applicationWillTerminate:),
+                will_terminate as extern "C" fn(&mut Object, Sel, id),
+            );
+            decl.add_method(
+                sel!(handleGPUIMenuItem:),
+                handle_menu_item as extern "C" fn(&mut Object, Sel, id),
+            );
+            decl.add_method(
+                sel!(cut:),
+                handle_menu_item as extern "C" fn(&mut Object, Sel, id),
+            );
+            decl.add_method(
+                sel!(copy:),
+                handle_menu_item as extern "C" fn(&mut Object, Sel, id),
+            );
+            decl.add_method(
+                sel!(paste:),
+                handle_menu_item as extern "C" fn(&mut Object, Sel, id),
+            );
+            decl.add_method(
+                sel!(selectAll:),
+                handle_menu_item as extern "C" fn(&mut Object, Sel, id),
+            );
+            decl.add_method(
+                sel!(undo:),
+                handle_menu_item as extern "C" fn(&mut Object, Sel, id),
+            );
+            decl.add_method(
+                sel!(redo:),
+                handle_menu_item as extern "C" fn(&mut Object, Sel, id),
+            );
+            decl.add_method(
+                sel!(validateMenuItem:),
+                validate_menu_item as extern "C" fn(&mut Object, Sel, id) -> bool,
+            );
+            decl.add_method(
+                sel!(menuWillOpen:),
+                menu_will_open as extern "C" fn(&mut Object, Sel, id),
+            );
+            decl.add_method(
+                sel!(applicationDockMenu:),
+                handle_dock_menu as extern "C" fn(&mut Object, Sel, id) -> id,
+            );
+            decl.add_method(
+                sel!(application:openURLs:),
+                open_urls as extern "C" fn(&mut Object, Sel, id, id),
+            );
+            decl.add_method(
+                sel!(onKeyboardLayoutChange:),
+                on_keyboard_layout_change as extern "C" fn(&mut Object, Sel, id),
+            );
+
+            decl.register()
+        };
+    }
 }
 
 pub(crate) struct MacPlatform(Mutex<MacPlatformState>);
@@ -179,6 +319,8 @@ pub(crate) struct MacPlatformState {
     dock_menu: Option<id>,
     menus: Option<Vec<OwnedMenu>>,
     keyboard_mapper: Rc<MacKeyboardMapper>,
+    embedded_delegate_proxy: Option<id>,
+    embedded_original_delegate: Option<id>,
 }
 
 impl Default for MacPlatform {
@@ -221,6 +363,8 @@ impl MacPlatform {
             on_keyboard_layout_change: None,
             menus: None,
             keyboard_mapper,
+            embedded_delegate_proxy: None,
+            embedded_original_delegate: None,
         }))
     }
 
@@ -270,7 +414,7 @@ impl MacPlatform {
                 application_menu.addItem_(menu_item);
 
                 if menu_config.name == "Window" {
-                    let app: id = msg_send![APP_CLASS, sharedApplication];
+                    let app = NSApplication::sharedApplication(nil);
                     app.setWindowsMenu_(menu);
                 }
             }
@@ -441,7 +585,7 @@ impl MacPlatform {
 
                     match menu_type {
                         SystemMenuType::Services => {
-                            let app: id = msg_send![APP_CLASS, sharedApplication];
+                            let app = NSApplication::sharedApplication(nil);
                             app.setServicesMenu_(item);
                         }
                     }
@@ -494,16 +638,52 @@ impl Platform for MacPlatform {
             let app_delegate: id = msg_send![APP_DELEGATE_CLASS, new];
             app.setDelegate_(app_delegate);
 
-            let self_ptr = self as *const Self as *const c_void;
-            (*app).set_ivar(MAC_PLATFORM_IVAR, self_ptr);
-            (*app_delegate).set_ivar(MAC_PLATFORM_IVAR, self_ptr);
+            let self_ptr = self as *const Self;
+            set_associated_platform(app, self_ptr);
+            set_associated_platform(app_delegate, self_ptr);
 
             let pool = NSAutoreleasePool::new(nil);
             app.run();
             pool.drain();
 
-            (*app).set_ivar(MAC_PLATFORM_IVAR, null_mut::<c_void>());
-            (*NSWindow::delegate(app)).set_ivar(MAC_PLATFORM_IVAR, null_mut::<c_void>());
+            set_associated_id(app, &MAC_PLATFORM_ASSOC_KEY, nil);
+            set_associated_id(app_delegate, &MAC_PLATFORM_ASSOC_KEY, nil);
+        }
+    }
+
+    fn run_embedded(&self, on_finish_launching: Box<dyn FnOnce()>) {
+        self.0.lock().finish_launching = Some(on_finish_launching);
+
+        unsafe {
+            let app = NSApplication::sharedApplication(nil);
+
+            let mut state = self.0.lock();
+            let proxy = if let Some(proxy) = state.embedded_delegate_proxy {
+                proxy
+            } else {
+                let current_delegate: id = msg_send![app, delegate];
+                let current_class: *const Class =
+                    if current_delegate.is_null() { ptr::null() } else { msg_send![current_delegate, class] };
+                if !current_delegate.is_null() && current_class == APP_DELEGATE_PROXY_CLASS {
+                    state.embedded_delegate_proxy = Some(current_delegate);
+                    current_delegate
+                } else {
+                    let proxy: id = msg_send![APP_DELEGATE_PROXY_CLASS, new];
+                    set_associated_original_delegate(proxy, current_delegate);
+                    state.embedded_original_delegate = (!current_delegate.is_null()).then_some(current_delegate);
+                    state.embedded_delegate_proxy = Some(proxy);
+                    app.setDelegate_(proxy);
+                    proxy
+                }
+            };
+            drop(state);
+
+            let self_ptr = self as *const Self;
+            set_associated_platform(app, self_ptr);
+            set_associated_platform(proxy, self_ptr);
+
+            let proxy_object: &mut Object = &mut *(proxy as *mut Object);
+            gpui_finish_launching(proxy_object);
         }
     }
 
@@ -923,7 +1103,7 @@ impl Platform for MacPlatform {
 
     fn set_menus(&self, menus: Vec<Menu>, keymap: &Keymap) {
         unsafe {
-            let app: id = msg_send![APP_CLASS, sharedApplication];
+            let app = NSApplication::sharedApplication(nil);
             let mut state = self.0.lock();
             let actions = &mut state.menu_actions;
             let menu = self.create_menu_bar(&menus, NSWindow::delegate(app), actions, keymap);
@@ -939,7 +1119,7 @@ impl Platform for MacPlatform {
 
     fn set_dock_menu(&self, menu: Vec<MenuItem>, keymap: &Keymap) {
         unsafe {
-            let app: id = msg_send![APP_CLASS, sharedApplication];
+            let app = NSApplication::sharedApplication(nil);
             let mut state = self.0.lock();
             let actions = &mut state.menu_actions;
             let new = self.create_dock_menu(menu, NSWindow::delegate(app), actions, keymap);
@@ -1374,13 +1554,47 @@ unsafe fn path_from_objc(path: id) -> PathBuf {
 
 unsafe fn get_mac_platform(object: &mut Object) -> &MacPlatform {
     unsafe {
+        if let Some(platform) = get_associated_platform(object as *mut _ as id) {
+            return &*platform;
+        }
+
         let platform_ptr: *mut c_void = *object.get_ivar(MAC_PLATFORM_IVAR);
         assert!(!platform_ptr.is_null());
         &*(platform_ptr as *const MacPlatform)
     }
 }
 
-extern "C" fn will_finish_launching(_this: &mut Object, _: Sel, _: id) {
+extern "C" fn forwarding_target_for_selector(this: &mut Object, _: Sel, selector: Sel) -> id {
+    unsafe {
+        let original = get_associated_original_delegate(this as *mut _ as id);
+        if original != nil {
+            let responds: bool = msg_send![original, respondsToSelector: selector];
+            if responds {
+                return original;
+            }
+        }
+        nil
+    }
+}
+
+extern "C" fn responds_to_selector(this: &mut Object, _: Sel, selector: Sel) -> bool {
+    unsafe {
+        let class: id = msg_send![this, class];
+        let super_responds: bool = msg_send![class, instancesRespondToSelector: selector];
+        if super_responds {
+            return true;
+        }
+
+        let original = get_associated_original_delegate(this as *mut _ as id);
+        if original == nil {
+            return false;
+        }
+
+        msg_send![original, respondsToSelector: selector]
+    }
+}
+
+extern "C" fn will_finish_launching(this: &mut Object, _: Sel, notification: id) {
     unsafe {
         let user_defaults: id = msg_send![class!(NSUserDefaults), standardUserDefaults];
 
@@ -1394,12 +1608,34 @@ extern "C" fn will_finish_launching(_this: &mut Object, _: Sel, _: id) {
             let false_value: id = msg_send![class!(NSNumber), numberWithBool:false];
             let _: () = msg_send![user_defaults, setObject: false_value forKey: name];
         }
+
+        let original = get_associated_original_delegate(this as *mut _ as id);
+        if original != nil {
+            let responds: bool = msg_send![original, respondsToSelector: sel!(applicationWillFinishLaunching:)];
+            if responds {
+                let _: () = msg_send![original, applicationWillFinishLaunching: notification];
+            }
+        }
     }
 }
 
-extern "C" fn did_finish_launching(this: &mut Object, _: Sel, _: id) {
+extern "C" fn did_finish_launching(this: &mut Object, _: Sel, notification: id) {
     unsafe {
-        let app: id = msg_send![APP_CLASS, sharedApplication];
+        gpui_finish_launching(this);
+
+        let original = get_associated_original_delegate(this as *mut _ as id);
+        if original != nil {
+            let responds: bool = msg_send![original, respondsToSelector: sel!(applicationDidFinishLaunching:)];
+            if responds {
+                let _: () = msg_send![original, applicationDidFinishLaunching: notification];
+            }
+        }
+    }
+}
+
+unsafe fn gpui_finish_launching(this: &mut Object) {
+    unsafe {
+        let app = NSApplication::sharedApplication(nil);
         app.setActivationPolicy_(NSApplicationActivationPolicyRegular);
 
         let notification_center: *mut Object =
@@ -1419,25 +1655,53 @@ extern "C" fn did_finish_launching(this: &mut Object, _: Sel, _: id) {
     }
 }
 
-extern "C" fn should_handle_reopen(this: &mut Object, _: Sel, _: id, has_open_windows: bool) {
-    if !has_open_windows {
-        let platform = unsafe { get_mac_platform(this) };
-        let mut lock = platform.0.lock();
-        if let Some(mut callback) = lock.reopen.take() {
-            drop(lock);
-            callback();
-            platform.0.lock().reopen.get_or_insert(callback);
+extern "C" fn should_handle_reopen(
+    this: &mut Object,
+    _: Sel,
+    app: id,
+    has_open_windows: bool,
+) -> bool {
+    unsafe {
+        if !has_open_windows {
+            let platform = get_mac_platform(this);
+            let mut lock = platform.0.lock();
+            if let Some(mut callback) = lock.reopen.take() {
+                drop(lock);
+                callback();
+                platform.0.lock().reopen.get_or_insert(callback);
+            }
         }
+
+        let original = get_associated_original_delegate(this as *mut _ as id);
+        if original != nil {
+            let responds: bool = msg_send![original, respondsToSelector: sel!(applicationShouldHandleReopen:hasVisibleWindows:)];
+            if responds {
+                return msg_send![original, applicationShouldHandleReopen: app hasVisibleWindows: has_open_windows];
+            }
+        }
+
+        true
     }
 }
 
-extern "C" fn will_terminate(this: &mut Object, _: Sel, _: id) {
-    let platform = unsafe { get_mac_platform(this) };
-    let mut lock = platform.0.lock();
-    if let Some(mut callback) = lock.quit.take() {
-        drop(lock);
-        callback();
-        platform.0.lock().quit.get_or_insert(callback);
+extern "C" fn will_terminate(this: &mut Object, _: Sel, notification: id) {
+    unsafe {
+        let original = get_associated_original_delegate(this as *mut _ as id);
+
+        let platform = get_mac_platform(this);
+        let mut lock = platform.0.lock();
+        if let Some(mut callback) = lock.quit.take() {
+            drop(lock);
+            callback();
+            platform.0.lock().quit.get_or_insert(callback);
+        }
+
+        if original != nil {
+            let responds: bool = msg_send![original, respondsToSelector: sel!(applicationWillTerminate:)];
+            if responds {
+                let _: () = msg_send![original, applicationWillTerminate: notification];
+            }
+        }
     }
 }
 
@@ -1458,7 +1722,9 @@ extern "C" fn on_keyboard_layout_change(this: &mut Object, _: Sel, _: id) {
 }
 
 extern "C" fn open_urls(this: &mut Object, _: Sel, _: id, urls: id) {
-    let urls = unsafe {
+    let original = unsafe { get_associated_original_delegate(this as *mut _ as id) };
+
+    let url_strings = unsafe {
         (0..urls.count())
             .filter_map(|i| {
                 let url = urls.objectAtIndex(i);
@@ -1476,8 +1742,18 @@ extern "C" fn open_urls(this: &mut Object, _: Sel, _: id, urls: id) {
     let mut lock = platform.0.lock();
     if let Some(mut callback) = lock.open_urls.take() {
         drop(lock);
-        callback(urls);
+        callback(url_strings);
         platform.0.lock().open_urls.get_or_insert(callback);
+    }
+
+    unsafe {
+        if original != nil {
+            let responds: bool = msg_send![original, respondsToSelector: sel!(application:openURLs:)];
+            if responds {
+                let app = NSApplication::sharedApplication(nil);
+                let _: () = msg_send![original, application: app openURLs: urls];
+            }
+        }
     }
 }
 
@@ -1500,6 +1776,26 @@ extern "C" fn handle_menu_item(this: &mut Object, _: Sel, item: id) {
 
 extern "C" fn validate_menu_item(this: &mut Object, _: Sel, item: id) -> bool {
     unsafe {
+        let action: Sel = msg_send![item, action];
+        let is_gpui_action = action == sel!(handleGPUIMenuItem:)
+            || action == sel!(cut:)
+            || action == sel!(copy:)
+            || action == sel!(paste:)
+            || action == sel!(selectAll:)
+            || action == sel!(undo:)
+            || action == sel!(redo:);
+
+        if !is_gpui_action {
+            let original = get_associated_original_delegate(this as *mut _ as id);
+            if original != nil {
+                let responds: bool = msg_send![original, respondsToSelector: sel!(validateMenuItem:)];
+                if responds {
+                    return msg_send![original, validateMenuItem: item];
+                }
+            }
+            return true;
+        }
+
         let mut result = false;
         let platform = get_mac_platform(this);
         let mut lock = platform.0.lock();
@@ -1521,8 +1817,10 @@ extern "C" fn validate_menu_item(this: &mut Object, _: Sel, item: id) -> bool {
     }
 }
 
-extern "C" fn menu_will_open(this: &mut Object, _: Sel, _: id) {
+extern "C" fn menu_will_open(this: &mut Object, _: Sel, menu: id) {
     unsafe {
+        let original = get_associated_original_delegate(this as *mut _ as id);
+
         let platform = get_mac_platform(this);
         let mut lock = platform.0.lock();
         if let Some(mut callback) = lock.will_open_menu.take() {
@@ -1530,18 +1828,35 @@ extern "C" fn menu_will_open(this: &mut Object, _: Sel, _: id) {
             callback();
             platform.0.lock().will_open_menu.get_or_insert(callback);
         }
+
+        if original != nil {
+            let responds: bool = msg_send![original, respondsToSelector: sel!(menuWillOpen:)];
+            if responds {
+                let _: () = msg_send![original, menuWillOpen: menu];
+            }
+        }
     }
 }
 
 extern "C" fn handle_dock_menu(this: &mut Object, _: Sel, _: id) -> id {
     unsafe {
+        let original = get_associated_original_delegate(this as *mut _ as id);
+
         let platform = get_mac_platform(this);
         let mut state = platform.0.lock();
-        if let Some(id) = state.dock_menu {
-            id
-        } else {
-            nil
+        if let Some(menu) = state.dock_menu {
+            return menu;
         }
+
+        if original != nil {
+            let responds: bool = msg_send![original, respondsToSelector: sel!(applicationDockMenu:)];
+            if responds {
+                let app = NSApplication::sharedApplication(nil);
+                let menu: id = msg_send![original, applicationDockMenu: app];
+                return menu;
+            }
+        }
+        nil
     }
 }
 
