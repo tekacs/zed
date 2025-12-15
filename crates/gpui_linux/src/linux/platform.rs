@@ -200,6 +200,14 @@ impl<P: LinuxClient + 'static> Platform for LinuxPlatform<P> {
         }
     }
 
+    fn run_embedded(&self, on_finish_launching: Box<dyn FnOnce()>) {
+        on_finish_launching();
+        log::warn!(
+            "gpui embedded mode does not currently integrate with the host event loop on linux; \
+             run gpui on a dedicated thread and use Application::run instead"
+        );
+    }
+
     fn quit(&self) {
         self.inner.with_common(|common| common.signal.stop());
     }

@@ -15,6 +15,36 @@ gpui = { version = "*" }
 
 Everything in GPUI starts with an `Application`. You can create one with `Application::new()`, and kick off your application by passing a callback to `Application::run()`. Inside this callback, you can create a new window with `App::open_window()`, and register your first root view. See [gpui.rs](https://www.gpui.rs/) for a complete example.
 
+## Embedding GPUI (Electron, host-owned UI loop)
+
+GPUI can be used in a process where another host already initialized and is already pumping the OS UI loop (for example, an Electron app). For this scenario, use `Application::run_embedded`, which does not take ownership of the platform event loop.
+
+```rust
+use gpui::Application;
+
+fn init_gpui() {
+    let _app = Application::new().run_embedded(|cx| {
+        // Configure GPUI and open windows here.
+        //
+        // Keep the returned handle alive for as long as you want GPUI to stay initialized.
+    });
+}
+```
+
+### Platform notes
+
+- macOS: `run_embedded` installs a GPUI NSApp delegate proxy that forwards unknown selectors to the host’s original delegate, so GPUI can continue to receive menu, dock-menu, reopen, and open-URL callbacks while preserving host behavior.
+- Windows: `run_embedded` starts GPUI’s vsync/invalidation thread. The host must pump the Win32 message loop on the same thread that created the GPUI app so `WM_GPUI_*` messages are dispatched.
+- Linux: `run_embedded` does not currently integrate GPUI’s calloop-based event loop into a host loop. The recommended approach is to run GPUI on a dedicated thread (same process) and use the normal `Application::run` on that thread.
+
+### Capability matrix (embedded mode)
+
+| Platform | Owns event loop? | Typical requirement | App-level callbacks |
+| --- | --- | --- | --- |
+| macOS | No | Must run on the macOS main thread | Preserved via delegate proxy |
+| Windows | No | Host pumps message loop on same thread | Preserved via message-only HWND + forwarding |
+| Linux | Not integrated | Run GPUI on a dedicated thread | Works when GPUI owns its calloop loop |
+
 ### Dependencies
 
 GPUI has various system dependencies that it needs in order to work.
